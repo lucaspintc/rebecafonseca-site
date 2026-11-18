@@ -234,7 +234,7 @@ const UI = {
   pw(id, ph = '', extra = '') {
     return `<div class="pw"><input class="input" id="${id}" type="password" placeholder="${esc(ph)}" ${extra}><button type="button" data-act="ver-senha" data-alvo="${id}" aria-label="Mostrar senha">${ic('eye')}</button></div>`;
   },
-  avatar(p, cls = '') { return p && p.foto ? `<span class="avatar ${cls}"><img src="${esc(p.foto)}" alt=""></span>` : `<span class="avatar ${cls}">${esc(fmt.iniciais(p && p.nome))}</span>`; }
+  avatar(p, cls = '') { const s = p && p.foto ? Arquivos.src(p.foto) : ''; return s ? `<span class="avatar ${cls}"><img src="${esc(s)}" alt=""></span>` : `<span class="avatar ${cls}">${esc(fmt.iniciais(p && p.nome))}</span>`; }
 };
 
 /* ---------------- WhatsApp ---------------- */
@@ -244,32 +244,71 @@ const Whats = {
   preencher(modelo, dados) { return String(modelo).replace(/\{(\w+)\}/g, (_, k) => dados[k] ?? ''); }
 };
 
-/* ---------------- Camada de dados (banco compartilhado do artefato, com reserva local) ---------------- */
+/* ---------------- Camada de dados ----------------
+   Modo 'supabase': banco no Supabase, com login no servidor, regras de acesso por família e tempo real.
+   Modo 'local': dados de exemplo só neste navegador (desenvolvimento e testes; abra com ?local).
+   A interface (iniciar, assinar, lista, get, salvar, atualizar, remover) é a mesma nos dois modos. */
 const Dados = {
-  modo: 'carregando', db: null, cache: {}, ouvintes: {}, subs: {}, prontos: {},
+  modo: 'carregando', sb: null, cache: {}, ouvintes: {}, canais: {}, prontos: {}, papel: 'anon', meuId: null, _saindo: false,
   COLS: ['pacientes', 'responsaveis', 'relatorios', 'recados', 'evolucoes', 'recursos', 'conteudos', 'roteiros', 'metricas', 'config', 'equipe', 'campanhas', 'conquistas'],
+  COLS_RESPONSAVEL: ['config', 'responsaveis', 'pacientes', 'relatorios', 'recados', 'recursos', 'conquistas'],
   async iniciar() {
-    let db = null;
-    try { db = window.claude && window.claude.use ? await Promise.race([window.claude.use('db'), new Promise((r) => setTimeout(() => r(null), 9000))]) : null; } catch { db = null; }
-    if (db) { this.db = db; this.modo = 'db'; }
-    else { this.modo = 'local'; this.semearLocal(); }
-    for (const c of this.COLS) this.assinar(c);
+    const cfg = window.RF_CONFIG || {};
+    const forcarLocal = /[?&]local\b/.test(location.search);
+    if (!forcarLocal && cfg.supabaseUrl && cfg.supabaseAnonKey && window.supabase && window.supabase.createClient) {
+      this.modo = 'supabase';
+      App.sessao = { gestao: null, area: null };
+      this.sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true, storage: window.sessionStorage } });
+      this.sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_OUT' && !this._saindo) this.recarregar(); });
+      await this.recarregar();
+    } else {
+      this.modo = 'local'; this.semearLocal();
+      for (const c of this.COLS) this.assinar(c);
+      App.render();
+    }
+  },
+  /* Descobre quem está conectado (equipe, responsável ou visitante) e carrega só o que essa pessoa pode ver */
+  async recarregar() {
+    for (const ch of Object.values(this.canais)) { try { await this.sb.removeChannel(ch); } catch {} }
+    this.canais = {}; this.cache = {}; this.prontos = {}; this.papel = 'anon'; this.meuId = null;
+    const { data } = await this.sb.auth.getSession(); const uidAtual = data && data.session && data.session.user.id;
+    if (uidAtual) {
+      const eq = await this.sb.from('equipe').select('id').eq('user_id', uidAtual).maybeSingle();
+      if (eq.data) { this.papel = 'equipe'; this.meuId = eq.data.id; }
+      else { const rs = await this.sb.from('responsaveis').select('id').eq('user_id', uidAtual).maybeSingle(); if (rs.data) { this.papel = 'responsavel'; this.meuId = rs.data.id; } }
+    }
+    const cols = this.papel === 'equipe' ? this.COLS : this.papel === 'responsavel' ? this.COLS_RESPONSAVEL : ['config'];
+    for (const c of this.COLS) if (!cols.includes(c)) { this.cache[c] = {}; this.prontos[c] = true; }
+    await Promise.all(cols.map((c) => this.assinar(c)));
+    if (this.papel === 'equipe') {
+      const e = this.get('equipe', this.meuId) || {};
+      App.sessao.gestao = { usuario: this.meuId, nome: e.nome || this.meuId, apelido: e.apelido || String(e.nome || this.meuId).split(' ')[0], trocarSenha: e.primeiroAcesso !== false };
+      App.sessao.area = null;
+    } else if (this.papel === 'responsavel') { App.sessao.area = { id: this.meuId }; App.sessao.gestao = null; }
+    else { App.sessao.area = null; App.sessao.gestao = null; }
     App.render();
   },
-  assinar(col) {
-    if (this.modo === 'db') {
-      if (this.subs[col]) return;
-      const timer = setTimeout(() => { if (!this.prontos[col]) { this.prontos[col] = true; this.cache[col] = this.cache[col] || {}; this.avisar(col); } }, 10000);
-      this.subs[col] = this.db.collection(col).onSnapshot((snap) => {
-        clearTimeout(timer);
-        const m = {}; snap.docs.forEach((d) => { m[d.id] = { ...d.data(), id: d.id }; });
-        const extra = ls.get('local:' + col, {});
-        this.cache[col] = { ...m, ...extra };
-        this.prontos[col] = true; this.avisar(col);
-      }, () => { clearTimeout(timer); this.cache[col] = { ...(this.cache[col] || {}), ...ls.get('local:' + col, {}) }; this.prontos[col] = true; this.avisar(col); });
-    } else {
-      this.cache[col] = ls.get('db:' + col, {}); this.prontos[col] = true;
+  _doc(col, r) { const id = col === 'config' && r.id === 'publico' && this.papel !== 'equipe' ? 'site' : r.id; return { ...(r.dados || {}), id }; },
+  async assinar(col) {
+    if (this.modo !== 'supabase') { this.cache[col] = ls.get('db:' + col, {}); this.prontos[col] = true; return; }
+    if (this.canais[col]) return;
+    const soPublico = col === 'config' && this.papel !== 'equipe';
+    const m = {}; let de = 0; const PAG = 1000;
+    for (;;) { // busca em páginas para coleções grandes
+      let q = this.sb.from(col).select('id,dados').range(de, de + PAG - 1);
+      if (soPublico) q = q.eq('id', 'publico');
+      const { data, error } = await q;
+      if (error) { console.error('Dados.assinar', col, error); break; }
+      (data || []).forEach((r) => { const d = this._doc(col, r); m[d.id] = d; });
+      if (!data || data.length < PAG) break; de += PAG;
     }
+    this.cache[col] = m; this.prontos[col] = true;
+    this.canais[col] = this.sb.channel('rf-' + col).on('postgres_changes', { event: '*', schema: 'public', table: col }, (p) => {
+      const c = this.cache[col] = this.cache[col] || {};
+      if (p.eventType === 'DELETE') { const id = p.old && p.old.id; if (id) delete c[soPublico && id === 'publico' ? 'site' : id]; }
+      else { if (soPublico && p.new.id !== 'publico') return; const d = this._doc(col, p.new); c[d.id] = d; }
+      this.avisar(col);
+    }).subscribe();
   },
   avisar(col) { (this.ouvintes[col] || []).forEach((f) => f()); App.agendarRender(); },
   lista(col) { return Object.values(this.cache[col] || {}); },
@@ -279,11 +318,20 @@ const Dados = {
     id = id || uid(col.slice(0, 3) + '-');
     const doc = { ...dados, id, atualizadoEm: new Date().toISOString() };
     this.cache[col] = this.cache[col] || {}; this.cache[col][id] = doc;
-    if (this.modo === 'db') {
-      try { const { id: _i, ...semId } = doc; await this.db.collection(col).doc(id).set(semId); }
-      catch (e) {
-        const extra = ls.get('local:' + col, {}); extra[id] = doc; ls.set('local:' + col, extra);
-        if (!opts.silencioso) UI.toast('Salvo só neste aparelho: sua conta não tem permissão para gravar no banco compartilhado.', 'bad');
+    if (this.modo === 'supabase') {
+      const { id: _i, salt: _s, hash: _h, iter: _it, ...semId } = doc; // senhas nunca vão para o banco: ficam no login do servidor
+      try {
+        if (this.papel === 'responsavel' && col === 'responsaveis') {
+          const { data, error } = await this.sb.rpc('salvar_meu_cadastro', { novo: semId }); if (error) throw error;
+          this.cache[col][id] = { ...this.cache[col][id], ...data };
+        } else if (col === 'conquistas' && this.papel !== 'equipe') {
+          const { error } = await this.sb.rpc('salvar_conquista', { pid: id, novo: semId }); if (error) throw error;
+        } else {
+          const { error } = await this.sb.from(col).upsert({ id, dados: semId }); if (error) throw error;
+        }
+      } catch (e) {
+        console.error('Dados.salvar', col, e);
+        if (!opts.silencioso) UI.toast('Não foi possível salvar. Verifique a conexão e tente de novo.', 'bad');
       }
     } else { ls.set('db:' + col, this.cache[col]); }
     App.agendarRender();
@@ -292,8 +340,7 @@ const Dados = {
   async atualizar(col, id, parcial, opts) { const atual = this.get(col, id) || {}; return this.salvar(col, id, { ...atual, ...parcial }, opts); },
   async remover(col, id) {
     if (this.cache[col]) delete this.cache[col][id];
-    const extra = ls.get('local:' + col, {}); if (extra[id]) { delete extra[id]; ls.set('local:' + col, extra); }
-    if (this.modo === 'db') { try { await this.db.collection(col).doc(id).delete(); } catch { UI.toast('Não foi possível excluir no banco compartilhado.', 'bad'); } }
+    if (this.modo === 'supabase') { const { error } = await this.sb.from(col).delete().eq('id', id); if (error) UI.toast('Não foi possível excluir. Tente de novo.', 'bad'); }
     else ls.set('db:' + col, this.cache[col]);
     App.agendarRender();
   },
@@ -321,12 +368,14 @@ const Cap = {
 const IA = {
   base: 'Você é a assistente de conteúdo e gestão da fonoaudióloga Rebeca Fonseca (CRFa 4-15570), especialista em linguagem infantil, PROMPT, CAA/PODD e Teste da Linguinha, que atende em Feira de Santana, Conceição do Jacuípe e Irará (Bahia). Escreva sempre em português do Brasil, com tom acolhedor, claro e profissional, focado em resolver a dúvida da mãe ou do pai e em tranquilizar famílias aflitas, inclusive de crianças atípicas. Nunca prometa resultados nem faça diagnóstico pelas redes, em respeito ao Código de Ética da Fonoaudiologia. Para afirmações sobre saúde, use apenas o consenso de instituições reconhecidas (OMS, Ministério da Saúde, Sociedade Brasileira de Pediatria, CFFa, SBFa, ASHA, CDC/AAP) ou estudos científicos amplamente citados; quando citar uma fonte, dê o nome exato da instituição ou dos autores e o ano, e nunca invente números, títulos ou links. Se não tiver certeza de uma fonte, diga "fonte a confirmar".',
   async texto(prompt, opts = {}) {
+    const input = Array.isArray(prompt) ? prompt : this.base + '\n\n' + prompt;
+    if (Dados.modo === 'supabase') return (await Auth.chamar('ia', { entrada: input })).texto;
     const s = await Cap.sample();
     if (!s) throw { code: 'indisponivel', message: 'A IA não está disponível nesta visualização. Abra o sistema pelo claude.ai com sua conta.' };
-    const input = Array.isArray(prompt) ? prompt : this.base + '\n\n' + prompt;
     return (await s(input, { cache: false, ...opts })).text;
   },
   async json(prompt, opts = {}) {
+    if (Dados.modo === 'supabase') return (await Auth.chamar('ia', { entrada: this.base + '\n\n' + prompt, json: true })).json;
     const s = await Cap.sample();
     if (!s) throw { code: 'indisponivel', message: 'A IA não está disponível nesta visualização. Abra o sistema pelo claude.ai com sua conta.' };
     return s.json(this.base + '\n\n' + prompt, { cache: false, ...opts });
@@ -337,6 +386,102 @@ const IA = {
     if (c === 'rate_limited') return 'Muitas solicitações seguidas. Aguarde um minuto e tente de novo.';
     if (c === 'invalid_json') return 'A resposta veio fora do formato esperado. Tente de novo com um pedido mais curto.';
     return (e && e.message) || 'Não consegui gerar agora. Tente novamente.';
+  }
+};
+
+/* ---------------- Login e contas (funções do servidor no Supabase) ---------------- */
+const Auth = {
+  async chamar(nome, corpo) {
+    if (!Dados.sb) throw { code: 'indisponivel', message: 'O sistema ainda está carregando. Tente de novo em instantes.' };
+    const { data, error } = await Dados.sb.functions.invoke(nome, { body: corpo });
+    if (error) {
+      let codigo = 'falha', msg = 'Não foi possível concluir agora. Verifique a conexão e tente de novo.';
+      try { const j = await error.context.json(); if (j && j.erro) { codigo = j.erro.codigo; msg = j.erro.mensagem; } } catch {}
+      throw { code: codigo, message: msg };
+    }
+    return data;
+  },
+  /* area: 'gestao' (equipe) ou 'area' (responsáveis) */
+  async entrar(usuario, senha, area) {
+    const r = await this.chamar('entrar', { usuario, senha, area });
+    const { error } = await Dados.sb.auth.setSession(r.sessao);
+    if (error) throw { code: 'sessao', message: 'Não foi possível abrir a sessão. Tente de novo.' };
+    await Dados.recarregar();
+    return r;
+  },
+  async sair() {
+    Dados._saindo = true;
+    try { await Dados.sb.auth.signOut(); } catch {}
+    Dados._saindo = false;
+    await Dados.recarregar();
+  },
+  async trocarSenha(nova, atual) {
+    await this.chamar('conta', { acao: 'trocar-senha', nova, atual });
+    const col = Dados.papel === 'equipe' ? 'equipe' : 'responsaveis'; const r = Dados.get(col, Dados.meuId);
+    if (r) { r.primeiroAcesso = false; r.senhaTrocadaEm = new Date().toISOString(); }
+    if (App.sessao.gestao) App.sessao.gestao.trocarSenha = false;
+  },
+  /* acao: 'criar-acesso' | 'redefinir' | 'remover-acesso'; tipo: 'responsavel' | 'equipe' */
+  acesso(acao, tipo, id) { return this.chamar('conta', { acao, tipo, id }); }
+};
+
+/* ---------------- Arquivos (fotos, assinaturas e vídeos no Storage do Supabase) ----------------
+   O documento guarda uma referência "sb://balde/caminho"; a tela pede um link temporário para exibir. */
+const Arquivos = {
+  urls: {}, pendentes: {},
+  ehRef(v) { return typeof v === 'string' && v.startsWith('sb://'); },
+  partes(ref) { const s = ref.slice(5); const i = s.indexOf('/'); return { balde: s.slice(0, i), caminho: s.slice(i + 1) }; },
+  async enviar(balde, caminho, blob) {
+    const { error } = await Dados.sb.storage.from(balde).upload(caminho, blob, { upsert: true, contentType: blob.type || undefined });
+    if (error) throw { code: 'upload', message: 'Não consegui guardar o arquivo. Tente de novo.' };
+    return `sb://${balde}/${caminho}`;
+  },
+  /* Imagem que veio como data URL (foto reduzida, assinatura): no Supabase vira arquivo; no modo local continua igual */
+  async guardarDataURL(balde, caminho, dataURL) {
+    if (Dados.modo !== 'supabase' || !dataURL || !String(dataURL).startsWith('data:')) return dataURL;
+    const blob = await (await fetch(dataURL)).blob();
+    return this.enviar(balde, caminho, blob);
+  },
+  /* Link para <img>/<video>. Se ainda não há link, pede em segundo plano e redesenha quando chegar. */
+  src(ref) {
+    if (!this.ehRef(ref)) return ref || '';
+    const u = this.urls[ref]; if (u && u.ate > Date.now()) return u.url;
+    if (!this.pendentes[ref] && Dados.sb) {
+      this.pendentes[ref] = true; const { balde, caminho } = this.partes(ref);
+      Dados.sb.storage.from(balde).createSignedUrl(caminho, 3600).then(({ data }) => {
+        delete this.pendentes[ref];
+        if (data && data.signedUrl) { this.urls[ref] = { url: data.signedUrl, ate: Date.now() + 50 * 60 * 1000 }; App.agendarRender(); }
+      });
+    }
+    return u ? u.url : '';
+  },
+  async comoDataURL(ref) {
+    if (!this.ehRef(ref)) return ref;
+    const { balde, caminho } = this.partes(ref);
+    const { data, error } = await Dados.sb.storage.from(balde).download(caminho); if (error || !data) return '';
+    return new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => res(''); fr.readAsDataURL(data); });
+  }
+};
+
+/* ---------------- Downloads e impressão direto no navegador ---------------- */
+const Baixar = {
+  arquivo(blob, nome) {
+    const u = URL.createObjectURL(blob); const a = document.createElement('a');
+    a.href = u; a.download = nome; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 60000);
+  },
+  imprimir(blob) {
+    const u = URL.createObjectURL(blob); const f = document.createElement('iframe');
+    f.setAttribute('aria-hidden', 'true'); f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden';
+    f.onload = () => { try { f.contentWindow.focus(); f.contentWindow.print(); } catch { window.open(u, '_blank', 'noopener'); } };
+    f.src = u; document.body.appendChild(f);
+    setTimeout(() => { f.remove(); URL.revokeObjectURL(u); }, 10 * 60 * 1000);
+  },
+  /* No claude.ai usa o salvamento do artefato; fora dele, baixa direto */
+  async salvar(blob, nome) {
+    const dl = await Cap.downloads();
+    if (dl) { await dl.save({ filename: nome, data: blob }); return; }
+    Baixar.arquivo(blob, nome);
   }
 };
 
@@ -427,6 +572,7 @@ const PDF = {
   /* Termos (LGPD e TCLE) com registro de aceite e assinatura */
   async termo({ titulo, secoes, registro = [], assinatura = '', nomeArquivo }) {
     if (!window.jspdf) throw new Error('Gerador de PDF não carregou. Verifique a conexão e recarregue a página.');
+    if (Arquivos.ehRef(assinatura)) assinatura = await Arquivos.comoDataURL(assinatura);
     const { jsPDF } = window.jspdf; const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const W = 210, H = 297, M = 20; const logo = await Img.dataURL('img/logo-verde.png');
     const cab = () => { doc.addImage(logo, 'PNG', (W - 70) / 2, 11, 70, 11.4); doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(120, 128, 53); doc.text(RF.marca.crfa.toUpperCase().split('').join(' '), W / 2, 27, { align: 'center' }); doc.setFillColor(120, 128, 53); doc.rect(0, H - 12, W, 12, 'F'); doc.setTextColor(255, 255, 255); doc.setFontSize(7.5); doc.text(`${RF.marca.nomeCompleto} · ${RF.marca.crfa} · WhatsApp ${RF.marca.whatsappTexto} · ${RF.marca.email}`, W / 2, H - 5, { align: 'center' }); };
@@ -452,17 +598,17 @@ const PDF = {
     return doc.output('blob');
   },
   async salvarTermo(opts) {
-    try { const blob = await PDF.termo(opts); const dl = await Cap.downloads(); if (!dl) { UI.toast('Esta visualização não permite salvar arquivos. Abra pelo claude.ai.', 'bad'); return; } await dl.save({ filename: opts.nomeArquivo || 'termo.pdf', data: blob }); UI.toast('PDF pronto.'); }
+    try { const blob = await PDF.termo(opts); await Baixar.salvar(blob, opts.nomeArquivo || 'termo.pdf'); UI.toast('PDF pronto.'); }
     catch (e) { if (e && e.code === 'declined') return; UI.toast((e && e.message) || 'Não foi possível gerar o PDF.', 'bad'); }
   },
   nome(rel, paciente) { return `${semAcento((RF.tiposRelatorio[rel.tipo] || {}).nome || 'Relatorio').replace(/\s+/g, '-')}_${semAcento(paciente ? paciente.nome.split(' ')[0] : 'paciente')}_${(rel.data || '').slice(0, 10)}.pdf`; },
-  async salvar(rel, paciente) {
+  /* modo 'imprimir' abre a impressão com o papel timbrado; senão baixa o PDF */
+  async salvar(rel, paciente, modo) {
     try {
       const blob = await PDF.gerar(rel, paciente);
-      const dl = await Cap.downloads();
-      if (!dl) { UI.toast('Esta visualização não permite salvar arquivos. Abra pelo claude.ai.', 'bad'); return false; }
-      await dl.save({ filename: PDF.nome(rel, paciente), data: blob });
-      UI.toast('PDF pronto. Abra o arquivo para imprimir ou enviar.');
+      if (modo === 'imprimir') { Baixar.imprimir(blob); return true; }
+      await Baixar.salvar(blob, PDF.nome(rel, paciente));
+      UI.toast('PDF baixado.');
       return true;
     } catch (e) { if (e && e.code === 'declined') return false; UI.toast((e && e.message) || 'Não foi possível gerar o PDF.', 'bad'); return false; }
   }
@@ -518,4 +664,4 @@ Acoes['ver-senha'] = (b) => { const i = document.getElementById(b.dataset.alvo);
 Acoes['ir'] = (a) => App.ir(a.dataset.rota);
 Acoes['copiar'] = (a) => UI.copiar(a.dataset.texto, a.closest('[data-copia]') || a);
 
-Object.assign(window, { $, $$, esc, uid, so, semAcento, ls, ss, fmt, ic, Valida, Senha, Hash, Rel, UI, Whats, Dados, Cap, IA, Img, PDF, App, Acoes });
+Object.assign(window, { $, $$, esc, uid, so, semAcento, ls, ss, fmt, ic, Valida, Senha, Hash, Rel, UI, Whats, Dados, Cap, IA, Auth, Arquivos, Baixar, Img, PDF, App, Acoes });
