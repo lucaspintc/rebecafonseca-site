@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://rebecafonseca.com.br/sitemap.xml
