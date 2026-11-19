@@ -411,12 +411,17 @@ const Auth = {
   },
   async sair() {
     Dados._saindo = true;
+    // Avisa o servidor (se a sessão ainda existir lá) e sempre limpa o login deste navegador
     try { await Dados.sb.auth.signOut(); } catch {}
+    try { await Dados.sb.auth.signOut({ scope: 'local' }); } catch {}
+    try { for (const k of Object.keys(sessionStorage)) if (/^sb-.*-auth-token/.test(k)) sessionStorage.removeItem(k); } catch {}
     Dados._saindo = false;
     await Dados.recarregar();
   },
   async trocarSenha(nova, atual) {
-    await this.chamar('conta', { acao: 'trocar-senha', nova, atual });
+    const resp = await this.chamar('conta', { acao: 'trocar-senha', nova, atual });
+    // A troca de senha encerra as sessões antigas no servidor; passa a usar a sessão nova
+    if (resp && resp.sessao) { try { await Dados.sb.auth.setSession(resp.sessao); } catch {} }
     const col = Dados.papel === 'equipe' ? 'equipe' : 'responsaveis'; const r = Dados.get(col, Dados.meuId);
     if (r) { r.primeiroAcesso = false; r.senhaTrocadaEm = new Date().toISOString(); }
     if (App.sessao.gestao) App.sessao.gestao.trocarSenha = false;
