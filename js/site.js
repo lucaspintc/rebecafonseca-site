@@ -12,25 +12,54 @@
     { i: 'users', t: 'Orientação às famílias', d: 'Estratégias simples para o dia a dia, relatórios claros e recados direto no seu WhatsApp e no portal.' }
   ];
 
-  function hojeIdx() { return new Date().getDay(); }
+  const F = RF.Feriados;
   const NUM = ['', 'Uma', 'Duas', 'Três', 'Quatro', 'Cinco', 'Seis', 'Sete', 'Oito', 'Nove', 'Dez'];
   const quantas = (n, s, p) => `${NUM[n] || n} ${n === 1 ? s : p}`;
   const listaCidades = (cs) => cs.length > 1 ? cs.slice(0, -1).join(', ') + ' e ' + cs[cs.length - 1] : (cs[0] || '');
+  const unicos = (xs) => xs.filter((v, i, a) => a.indexOf(v) === i);
+  const nomesFer = (fs) => listaCidades(unicos(fs.map(F.curto)));
+
+  /* Hoje e os próximos dias, sem domingo, com a data de cada um */
+  function proximosDias(n) {
+    const out = []; let dia = F.hojeISO();
+    while (out.length < n) { if (F.diaSemana(dia) !== 0) out.push(dia); dia = F.somar(dia, 1); }
+    return out;
+  }
 
   function semana(locais) {
-    const dias = [1, 2, 3, 4, 5, 6];
-    return `<div class="semana" aria-label="Agenda da semana">${dias.map((d) => {
-      const aqui = locais.flatMap((l) => l.dias.filter((x) => x.d === d).map((x) => ({ l, t: x.turno })));
-      return `<div class="dia ${hojeIdx() === d ? 'hoje' : ''}"><div class="nome">${RF.diasSemana[d]}${hojeIdx() === d ? ' · hoje' : ''}</div>${aqui.map((a) => `<div class="lugar">${esc(a.l.nome.replace('Clínica ', ''))}<small>${esc(a.l.cidade)}${a.t !== 'Dia todo' ? ' · ' + esc(a.t.toLowerCase()) : ''}</small></div>`).join('')}</div>`;
+    const hoje = F.hojeISO();
+    return `<div class="semana" role="list" aria-label="Agenda dos próximos dias">${proximosDias(6).map((dia) => {
+      const d = F.diaSemana(dia); const geral = F.geral(dia); const ehHoje = dia === hoje;
+      const aqui = locais.flatMap((l) => l.dias.filter((x) => x.d === d).map((x) => ({ l, t: x.turno, mun: F.municipal(dia, l.cidade) })));
+      const lugar = (a) => {
+        const fechado = geral.length || a.mun.length;
+        return `<div class="lugar ${fechado ? 'fechado' : ''}"><span class="lnome">${esc(a.l.nome.replace('Clínica ', ''))}</span><small>${esc(a.l.cidade)}${a.t !== 'Dia todo' ? ' · ' + esc(a.t.toLowerCase()) : ''}</small>${!geral.length && a.mun.length ? `<span class="fer-tag">${ic('flag')}<span>Feriado em ${esc(a.l.cidade)}: ${esc(nomesFer(a.mun))} · sem atendimento</span></span>` : fechado ? '<span class="sr-only"> · sem atendimento</span>' : ''}</div>`;
+      };
+      return `<div class="dia ${ehHoje ? 'hoje' : ''} ${geral.length ? 'feriado' : ''}" role="listitem"><div class="nome">${RF.diasSemana[d]} <span class="tnum">${F.dataCurta(dia)}</span>${ehHoje ? ' · hoje' : ''}</div>${geral.length ? `<div class="fer">${ic('flag')}<span><b>${esc(F.rotulo(geral[0]))}</b>${esc(nomesFer(geral))}${aqui.length ? '<br>Sem atendimento' : ''}</span></div>` : ''}${aqui.map(lugar).join('')}</div>`;
     }).join('')}</div>`;
+  }
+
+  /* Etiqueta “Hoje” da foto do topo */
+  function hojeTag(locais) {
+    const dia = F.hojeISO(); const d = F.diaSemana(dia); const geral = F.geral(dia);
+    if (geral.length) return `<strong>Hoje: feriado</strong>${esc(nomesFer(geral))} · sem atendimento`;
+    const l = locais.filter((x) => x.dias.some((y) => y.d === d));
+    const abertas = l.filter((x) => !F.municipal(dia, x.cidade).length);
+    const fechadas = l.filter((x) => F.municipal(dia, x.cidade).length);
+    const cAbertas = unicos(abertas.map((x) => x.cidade)), cFechadas = unicos(fechadas.map((x) => x.cidade));
+    const topo = cAbertas.length ? esc(cAbertas.join(' e ')) : fechadas.length ? 'feriado' : 'dia de descanso';
+    const linha = fechadas.length ? `Feriado em ${esc(listaCidades(cFechadas))}: ${esc(nomesFer(fechadas.flatMap((x) => F.municipal(dia, x.cidade))))} · sem atendimento${cAbertas.length ? ' lá' : ''}` : `${RF.diasSemana[d]} na agenda da Rebeca`;
+    return `<strong>Hoje: ${topo}</strong>${linha}`;
   }
 
   function cardLocal(l) {
     const msg = M.msgAgenda;
     const quando = l.dias.map((x) => `<span class="pill ${x.turno === 'Dia todo' ? 'sage' : 'rose'}">${RF.diasSemana[x.d]}${x.turno !== 'Dia todo' ? ' · ' + x.turno.toLowerCase() : ''}</span>`).join('');
+    const fer = F.proximos(l, 60).slice(0, 3);
     return `<article class="local" id="local-${l.id}">
       <div class="row between"><div><div class="eyebrow">${esc(l.cidade)}</div><h3 style="margin-top:6px">${esc(l.nome)}</h3></div></div>
       <div class="quando">${quando}</div>
+      ${fer.length ? `<div class="linha fer-prox">${ic('flag')}<span><b>Sem atendimento por feriado:</b> ${fer.map((p) => `${esc(RF.diasSemana[p.d].toLowerCase())}, <span class="tnum">${F.dataCurta(p.dia)}</span> (${esc(nomesFer(p.feriados))})`).join('; ')}</span></div>` : ''}
       <div class="linha">${ic('pin')}<span>${esc(l.endereco)}</span></div>
       ${l.whatsapp ? `<div class="linha">${ic('whats')}<span data-copia>WhatsApp da clínica: <b class="tnum">${esc(fmt.tel(l.whatsapp))}</b></span></div>` : ''}
       ${l.tel && so(l.tel) !== so(l.whatsapp).slice(-so(l.tel).length) ? `<div class="linha">${ic('phone')}<span data-copia>Telefone: <b class="tnum">${esc(l.tel)}</b></span></div>` : ''}
@@ -95,7 +124,7 @@
   <div class="hero-photo">
     <div class="frame"><img src="img/hero.jpg" alt="Rebeca Fonseca, fonoaudióloga, sorrindo"></div>
     <img class="mark" src="img/marca.png" alt="" aria-hidden="true">
-    <div class="tag"><strong>Hoje: ${(() => { const d = new Date().getDay(); const l = locais.filter((x) => x.dias.some((y) => y.d === d)); return l.length ? esc(l.map((x) => x.cidade).filter((v, i, a) => a.indexOf(v) === i).join(' e ')) : 'dia de descanso'; })()}</strong>${RF.diasSemana[new Date().getDay()]} na agenda da Rebeca</div>
+    <div class="tag">${hojeTag(locais)}</div>
   </div>
 </div></section>
 

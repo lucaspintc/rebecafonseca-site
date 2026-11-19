@@ -134,8 +134,9 @@
   /* ---------------- Painel ---------------- */
   function filaDoDia() {
     const itens = []; const hoje = new Date(); const md = hoje.toISOString().slice(5, 10);
-    const amanha = (hoje.getDay() + 1) % 7;
-    const locaisAmanha = Dados.locais().filter((l) => l.dias.some((d) => d.d === amanha)).map((l) => l.id);
+    /* Sem lembrete de sessão quando amanhã é feriado na cidade da clínica */
+    const { dia: diaAmanha, d: amanha } = amanhaInfo();
+    const locaisAmanha = Dados.locais().filter((l) => l.dias.some((d) => d.d === amanha) && !RF.Feriados.doDia(diaAmanha, l.cidade).length).map((l) => l.id);
     pacientesAtivos().forEach((p) => {
       const rs = respsDe(p);
       if (p.nascimento && p.nascimento.slice(5, 10) === md) itens.push({ tipo: 'Aniversário', p, rs, texto: (r) => `Olá, ${r.nome.split(' ')[0]}! Hoje é um dia especial: feliz aniversário, ${p.nome.split(' ')[0]}! Que alegria acompanhar o crescimento dele(a). Um abraço, Rebeca.` });
@@ -159,9 +160,27 @@
     if (a.dataset.rel) { const rel = Dados.get('relatorios', a.dataset.rel); if (rel) Dados.atualizar('relatorios', rel.id, { envios: [...(rel.envios || []), { em: new Date().toISOString(), para: r.id }] }); }
   };
 
+  function amanhaInfo() { const F = RF.Feriados; const dia = F.somar(F.hojeISO(), 1); return { dia, d: F.diaSemana(dia) }; }
+  /* Clínicas com agenda no dia que caem em feriado na cidade delas */
+  function emFeriado(dia) {
+    const F = RF.Feriados; const d = F.diaSemana(dia);
+    return Dados.locais().filter((l) => l.dias.some((x) => x.d === d)).map((l) => ({ l, fs: F.doDia(dia, l.cidade) })).filter((x) => x.fs.length);
+  }
+  const nomesFeriado = (fs) => fs.map(RF.Feriados.curto).filter((v, i, a) => a.indexOf(v) === i).join(' e ');
+  function avisoFeriado(dia, quando) {
+    const xs = emFeriado(dia); if (!xs.length) return '';
+    const F = RF.Feriados; const geral = F.geral(dia);
+    const amanha = quando === 'Amanhã';
+    const txt = geral.length
+      ? `${quando} é feriado: ${nomesFeriado(geral)}. Não há atendimento nas clínicas${amanha ? ', por isso não há lembretes de sessão' : ''}.`
+      : xs.map((x) => `${quando} é feriado em ${x.l.cidade} (${nomesFeriado(x.fs)}): sem atendimento na ${nomeLocal(x.l.id)}.`).join(' ') + (amanha ? ` Os lembretes de sessão ${xs.length > 1 ? 'dessas clínicas' : 'dessa clínica'} não aparecem.` : '');
+    return `<div class="note warn" style="margin-bottom:12px">${ic('flag')}<span>${esc(txt)}</span></div>`;
+  }
+
   function painel() {
-    const ps = pacientesAtivos(); const d = new Date().getDay();
-    const locaisHoje = Dados.locais().filter((l) => l.dias.some((x) => x.d === d));
+    const ps = pacientesAtivos(); const hojeDia = RF.Feriados.hojeISO(); const d = RF.Feriados.diaSemana(hojeDia);
+    const ferHoje = emFeriado(hojeDia).map((x) => x.l.id);
+    const locaisHoje = Dados.locais().filter((l) => l.dias.some((x) => x.d === d) && !ferHoje.includes(l.id));
     const rasc = Dados.lista('relatorios').filter((r) => r.status !== 'publicado');
     const sem = Date.now() - 7 * 864e5; const rec7 = Dados.lista('recados').filter((r) => new Date(r.enviadoEm).getTime() > sem);
     const props = Dados.lista('conteudos').filter((c) => c.status === 'proposto');
@@ -169,7 +188,7 @@
     const fila = filaDoDia();
     const h = new Date().getHours(); const saud = h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite';
     const corpo = `
-      <div class="bubble soft"><div class="row between"><div><div class="eyebrow">${RF.diasSemana[d]}, ${new Date().toLocaleDateString('pt-BR', { day: 'numeric', month: 'long' })}</div><h2 style="font-size:30px;margin-top:6px">${saud}, ${esc(eu().apelido)}.</h2><p class="muted" style="margin-top:6px">${locaisHoje.length ? 'Hoje você atende em ' + esc(locaisHoje.map((l) => `${l.nome} (${l.dias.find((x) => x.d === d).turno.toLowerCase()})`).join(' e ')) + '.' : 'Hoje não há atendimento na agenda.'}</p></div>
+      <div class="bubble soft"><div class="row between"><div><div class="eyebrow">${RF.diasSemana[d]}, ${new Date().toLocaleDateString('pt-BR', { day: 'numeric', month: 'long' })}</div><h2 style="font-size:30px;margin-top:6px">${saud}, ${esc(eu().apelido)}.</h2><p class="muted" style="margin-top:6px">${locaisHoje.length ? 'Hoje você atende em ' + esc(locaisHoje.map((l) => `${l.nome} (${l.dias.find((x) => x.d === d).turno.toLowerCase()})`).join(' e ')) + '.' : ferHoje.length ? 'Hoje é feriado: não há atendimento na agenda.' : 'Hoje não há atendimento na agenda.'}</p></div>
         <div class="row"><button class="btn btn-primary" data-act="novo-paciente">${ic('plus')} Novo paciente</button><button class="btn btn-ghost" data-act="novo-relatorio">${ic('file')} Novo relatório</button></div></div></div>
       <div class="kpis">
         <div class="kpi"><div class="eyebrow">Pacientes ativos</div><div class="v">${ps.length}</div><div class="d muted">${Dados.lista('responsaveis').filter((r) => r.primeiroAcesso).length} acesso(s) aguardando primeiro login</div></div>
@@ -179,6 +198,7 @@
       </div>
       <div class="cols-2">
         <div class="panel"><div class="panel-head"><div><h3>Envios do dia</h3><p class="small muted">Mensagens prontas geradas pelo sistema: aniversários, lembretes da sessão de amanhã e relatórios ainda não enviados.</p></div></div>
+          ${avisoFeriado(hojeDia, 'Hoje')}${avisoFeriado(amanhaInfo().dia, 'Amanhã')}
           ${fila.length ? `<div class="list">${fila.map((it) => `<div class="li">${UI.avatar(it.p)}<div class="grow"><div class="t">${esc(it.p.nome)}${exTag(it.p)}</div><div class="s">${esc(it.tipo)}${it.tipo === 'Lembrete de sessão' ? ' · ' + esc(nomeLocal(it.p.local)) : ''}</div></div><div class="row">${botoesWhats(it.rs, it.texto, `data-pac="${it.p.id}"${it.rel ? ` data-rel="${it.rel.id}"` : ''}`)}</div></div>`).join('')}</div>` : `<div class="empty">${ic('check')}<div>Nada pendente para hoje.</div></div>`}
           <p class="small muted" style="margin-top:12px">Cada botão abre o WhatsApp com a mensagem pronta; é só tocar em enviar. O recado fica registrado na pasta do paciente.</p>
         </div>
