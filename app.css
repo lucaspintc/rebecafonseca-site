@@ -238,6 +238,17 @@ textarea.input { min-height: 110px; resize: vertical; line-height: 1.55; }
 .dia .nome { font: 600 12px/1 var(--f-body); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .dia .lugar { margin-top: 8px; font-size: 13px; line-height: 1.35; }
 .dia .lugar small { display: block; color: var(--olive); font-weight: 500; }
+.dia .nome .tnum { letter-spacing: .04em; }
+/* Feriados na agenda */
+.dia.feriado { background: var(--terra-soft); }
+.dia .fer { margin-top: 8px; display: grid; grid-template-columns: 15px minmax(0, 1fr); gap: 6px; font-size: 12.5px; line-height: 1.35; color: var(--terra-ink); }
+.dia .fer svg, .dia .fer-tag svg { width: 14px; height: 14px; margin-top: 1px; }
+.dia .fer b { display: block; font-weight: 600; }
+.dia .lugar.fechado .lnome { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--muted); }
+.dia .lugar.fechado small { color: var(--muted); }
+.dia .fer-tag { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 5px; margin-top: 5px; padding: 5px 7px; border-radius: 8px; background: var(--terra-soft); color: var(--terra-ink); font-size: 11.5px; line-height: 1.3; }
+.local .fer-prox svg { color: var(--terra); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (max-width: 860px) { .semana { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 460px) { .semana { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
